@@ -30,6 +30,11 @@
                 "glob": "_redirects",
                 "input": "src",
                 "output": "/"
+              },
+              {
+                "glob": "env.js",
+                "input": "src",
+                "output": "/"
               }
             ],
             "styles": ["realworld/assets/theme/styles.css"],

@@ -1,0 +1,55 @@
+name: CD
+
+# Every merge to main builds once and deploys straight to dev (no cluster
+# involved - this is a pure static-asset sync, unlike the backend's
+# path). Promoting to staging/prod (promote.yml) copies these exact
+# built files, never rebuilds them.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - run: bun install --frozen-lockfile
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Fetch the backend's URL (published by conduit-platform's deploy workflow)
+        id: backend
+        run: |
+          URL=$(aws ssm get-parameter --name "${{ vars.BACKEND_URL_PARAMETER_NAME }}" --query 'Parameter.Value' --output text 2>/dev/null || true)
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: bunx ng build --configuration production
+
+      - name: Point env.js at the real backend
+        if: steps.backend.outputs.url != ''
+        run: |
+          cat > dist/angular-conduit/browser/env.js <<EOF
+          window.__env__ = { apiUrl: "${{ steps.backend.outputs.url }}" };
+          EOF
+
+      - name: Sync to S3
+        run: aws s3 sync dist/angular-conduit/browser/ "s3://${{ vars.FRONTEND_BUCKET_NAME }}/" --delete
+
+      - name: Invalidate CloudFront
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}" \
+            --paths "/*"

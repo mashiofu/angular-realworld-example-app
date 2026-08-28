@@ -1,0 +1,56 @@
+name: Promote
+
+# Manually triggered: copies dev's already-built assets into staging's or
+# prod's own bucket (no rebuild), then re-points env.js at THAT
+# environment's own backend - it must be re-pointed, not just copied
+# verbatim, since staging/prod each have their own separate backend/ALB.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: "Environment to promote into"
+        required: true
+        type: choice
+        options: [staging, prod]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    # The approval gate for prod promotions - see this repo's "prod"
+    # Environment protection rules.
+    environment: ${{ inputs.target_environment }}
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Copy dev's built assets locally
+        run: aws s3 sync "s3://${{ vars.DEV_FRONTEND_BUCKET_NAME }}/" ./dist-promote/
+
+      - name: Fetch this environment's backend URL
+        id: backend
+        run: |
+          URL=$(aws ssm get-parameter --name "${{ vars.BACKEND_URL_PARAMETER_NAME }}" --query 'Parameter.Value' --output text 2>/dev/null || true)
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Re-point env.js at this environment's own backend
+        if: steps.backend.outputs.url != ''
+        run: |
+          cat > ./dist-promote/env.js <<EOF
+          window.__env__ = { apiUrl: "${{ steps.backend.outputs.url }}" };
+          EOF
+
+      - name: Sync to ${{ inputs.target_environment }}'s bucket
+        run: aws s3 sync ./dist-promote/ "s3://${{ vars.FRONTEND_BUCKET_NAME }}/" --delete
+
+      - name: Invalidate CloudFront
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}" \
+            --paths "/*"

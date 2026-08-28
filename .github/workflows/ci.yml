@@ -13,6 +13,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # realworld/ is a git submodule (the shared theme CSS lives in
+          # it - see angular.json's `styles` array) - actions/checkout
+          # doesn't fetch submodule content by default. lint.yml,
+          # playwright.yml, and security-tests.yml already have this;
+          # this workflow was just missed.
+          submodules: true
 
       - uses: oven-sh/setup-bun@v2
 

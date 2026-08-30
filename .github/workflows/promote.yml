@@ -1,9 +1,9 @@
 name: Promote
 
-# Manually triggered: copies dev's already-built assets into staging's or
-# prod's own bucket (no rebuild), then re-points env.js at THAT
-# environment's own backend - it must be re-pointed, not just copied
-# verbatim, since staging/prod each have their own separate backend/ALB.
+# Manually triggered: copies an image tag that's already running in dev
+# into staging's or prod's own ECR repo (docker buildx imagetools create
+# re-tags at the registry level - no rebuild) and deploys it there. Same
+# shape as the backend repo's own promote.yml.
 
 on:
   workflow_dispatch:
@@ -13,6 +13,9 @@ on:
         required: true
         type: choice
         options: [staging, prod]
+      image_tag:
+        description: "Image tag currently running in dev (e.g. sha-abc123def456)"
+        required: true
 
 permissions:
   id-token: write
@@ -21,8 +24,6 @@ permissions:
 jobs:
   promote:
     runs-on: ubuntu-latest
-    # The approval gate for prod promotions - see this repo's "prod"
-    # Environment protection rules.
     environment: ${{ inputs.target_environment }}
     steps:
       - uses: aws-actions/configure-aws-credentials@v4
@@ -30,27 +31,20 @@ jobs:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
-      - name: Copy dev's built assets locally
-        run: aws s3 sync "s3://${{ vars.DEV_FRONTEND_BUCKET_NAME }}/" ./dist-promote/
+      - uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Fetch this environment's backend URL
-        id: backend
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Copy dev's image into ${{ inputs.target_environment }}'s ECR repo
         run: |
-          URL=$(aws ssm get-parameter --name "${{ vars.BACKEND_URL_PARAMETER_NAME }}" --query 'Parameter.Value' --output text 2>/dev/null || true)
-          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          docker buildx imagetools create \
+            --tag "${{ vars.ECR_REPOSITORY_URL }}:${{ inputs.image_tag }}" \
+            "${{ vars.ECR_REPOSITORY_URL_DEV }}:${{ inputs.image_tag }}"
 
-      - name: Re-point env.js at this environment's own backend
-        if: steps.backend.outputs.url != ''
+      - name: Trigger deploy in conduit-platform
+        env:
+          GH_TOKEN: ${{ secrets.PLATFORM_DISPATCH_TOKEN }}
         run: |
-          cat > ./dist-promote/env.js <<EOF
-          window.__env__ = { apiUrl: "${{ steps.backend.outputs.url }}" };
-          EOF
-
-      - name: Sync to ${{ inputs.target_environment }}'s bucket
-        run: aws s3 sync ./dist-promote/ "s3://${{ vars.FRONTEND_BUCKET_NAME }}/" --delete
-
-      - name: Invalidate CloudFront
-        run: |
-          aws cloudfront create-invalidation \
-            --distribution-id "${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}" \
-            --paths "/*"
+          printf '{"event_type":"frontend-deploy","client_payload":{"environment":"%s","image_tag":"%s"}}' \
+            "${{ inputs.target_environment }}" "${{ inputs.image_tag }}" \
+            | gh api "repos/${{ vars.PLATFORM_REPO }}/dispatches" --input -

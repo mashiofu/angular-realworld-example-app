@@ -1,9 +1,12 @@
 name: CD
 
-# Every merge to main builds once and deploys straight to dev (no cluster
-# involved - this is a pure static-asset sync, unlike the backend's
-# path). Promoting to staging/prod (promote.yml) copies these exact
-# built files, never rebuilds them.
+# Push-based, not GitOps (see conduit-platform/docs/design-decisions.md
+# for that trade-off). Every merge to main builds once and auto-deploys
+# to dev only - staging/prod are a deliberate, separate promotion step
+# (promote.yml) that re-tags and re-deploys this exact image, never
+# rebuilds it. Same shape as the backend's own cd.yml, now that this
+# repo is containerized too (see conduit-platform/docs/design-decisions.md
+# for why it moved off S3/CloudFront).
 
 on:
   push:
@@ -19,49 +22,49 @@ permissions:
   contents: read
 
 jobs:
-  build-and-deploy:
+  build-and-push:
     runs-on: ubuntu-latest
     environment: dev
+    outputs:
+      image_tag: ${{ steps.vars.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
           # realworld/ is a git submodule (the shared theme CSS lives in
           # it - see angular.json's `styles` array) - actions/checkout
-          # doesn't fetch submodule content by default. lint.yml,
-          # playwright.yml, and security-tests.yml already have this;
-          # this workflow was just missed.
+          # doesn't fetch submodule content by default.
           submodules: true
 
-      - uses: oven-sh/setup-bun@v2
-
-      - run: bun install --frozen-lockfile
+      - id: vars
+        run: echo "tag=sha-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
-      - name: Fetch the backend's URL (published by conduit-platform's deploy workflow)
-        id: backend
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ vars.ECR_REPOSITORY_URL }}:${{ steps.vars.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  dispatch-deploy:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment: dev
+    steps:
+      - name: Trigger deploy in conduit-platform
+        env:
+          GH_TOKEN: ${{ secrets.PLATFORM_DISPATCH_TOKEN }}
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
         run: |
-          URL=$(aws ssm get-parameter --name "${{ vars.BACKEND_URL_PARAMETER_NAME }}" --query 'Parameter.Value' --output text 2>/dev/null || true)
-          echo "url=$URL" >> "$GITHUB_OUTPUT"
-
-      - name: Build
-        run: bunx ng build --configuration production
-
-      - name: Point env.js at the real backend
-        if: steps.backend.outputs.url != ''
-        run: |
-          cat > dist/angular-conduit/browser/env.js <<EOF
-          window.__env__ = { apiUrl: "${{ steps.backend.outputs.url }}" };
-          EOF
-
-      - name: Sync to S3
-        run: aws s3 sync dist/angular-conduit/browser/ "s3://${{ vars.FRONTEND_BUCKET_NAME }}/" --delete
-
-      - name: Invalidate CloudFront
-        run: |
-          aws cloudfront create-invalidation \
-            --distribution-id "${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}" \
-            --paths "/*"
+          printf '{"event_type":"frontend-deploy","client_payload":{"environment":"dev","image_tag":"%s"}}' \
+            "$IMAGE_TAG" | gh api "repos/${{ vars.PLATFORM_REPO }}/dispatches" --input -

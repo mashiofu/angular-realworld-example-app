@@ -1,4 +1,4 @@
-> **This fork** deploys this frontend to S3/CloudFront as part of a DevOps take-home platform - see [conduit-platform](https://github.com/mashiofu/conduit-platform) for the Terraform/Helm/CI-CD that builds around it, and `docs/design-decisions.md` there for the specific changes made in this fork (the hardcoded demo API URL replaced with a runtime-configurable `env.js`, `zone.js` added as a real dependency so the test suite actually installs and runs). Everything below this line is the original upstream README.
+> **This fork** builds this frontend into a container and deploys it to EKS as part of a DevOps take-home platform - see [conduit-platform](https://github.com/mashiofu/conduit-platform) for the Terraform/Helm/CI-CD that builds around it, and `docs/design-decisions.md` there for the specific changes made in this fork (the hardcoded demo API URL replaced with a runtime-configurable `env.js`, `zone.js` added as a real dependency so the test suite actually installs and runs). Everything below this line is the original upstream README.
 
 # ![Angular Example App](logo.png)
 
